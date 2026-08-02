@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from agents import RunContextWrapper, function_tool
 
@@ -16,11 +16,12 @@ from strix.domains.product_security.firmware.models import (
 from strix.domains.product_security.firmware.service import FirmwareAnalysisService
 
 
-def _service(ctx: RunContextWrapper[Any]) -> FirmwareAnalysisService:
-    context = ctx.context
-    service = (
-        context.get("firmware_analysis_service") if isinstance(context, dict) else None
+def firmware_service(ctx: RunContextWrapper[Any]) -> FirmwareAnalysisService:
+    raw_context = ctx.context
+    context = (
+        cast("dict[str, object]", raw_context) if isinstance(raw_context, dict) else {}
     )
+    service = context.get("firmware_analysis_service")
     if not isinstance(service, FirmwareAnalysisService):
         raise FirmwareDomainError(
             "FIRMWARE_DOMAIN_NOT_ENABLED",
@@ -30,7 +31,7 @@ def _service(ctx: RunContextWrapper[Any]) -> FirmwareAnalysisService:
     return service
 
 
-def _success(
+def success_result(
     data: Any,
     *,
     message: str,
@@ -44,7 +45,7 @@ def _success(
     ).model_dump_json()
 
 
-def _failure(exc: FirmwareDomainError) -> str:
+def failure_result(exc: FirmwareDomainError) -> str:
     return FirmwareToolResult[Any].from_error(exc).model_dump_json()
 
 
@@ -64,10 +65,13 @@ async def list_firmware_jobs(ctx: RunContextWrapper[Any]) -> str:
     """List redacted firmware analysis job summaries for this scan."""
     try:
         require_firmware_permission(ctx, FirmwarePermission.SUMMARY_READ)
-        jobs = [_summary(item) for item in _service(ctx).list_analyses()]
-        return _success(jobs, message=f"Returned {len(jobs)} firmware job summaries.")
+        jobs = [_summary(item) for item in firmware_service(ctx).list_analyses()]
+        return success_result(
+            jobs,
+            message=f"Returned {len(jobs)} firmware job summaries.",
+        )
     except FirmwareDomainError as exc:
-        return _failure(exc)
+        return failure_result(exc)
 
 
 @function_tool(timeout=30)
@@ -78,15 +82,15 @@ async def get_firmware_summary(
     """Return one redacted firmware analysis summary."""
     try:
         require_firmware_permission(ctx, FirmwarePermission.SUMMARY_READ)
-        record = _service(ctx).get_summary(analysis_id)
+        record = firmware_service(ctx).get_summary(analysis_id)
         require_firmware_permission(
             ctx,
             FirmwarePermission.SUMMARY_READ,
             input_artifact_id=record.input_artifact_id,
         )
-        return _success(_summary(record), message="Firmware summary returned.")
+        return success_result(_summary(record), message="Firmware summary returned.")
     except FirmwareDomainError as exc:
-        return _failure(exc)
+        return failure_result(exc)
 
 
 @function_tool(timeout=30)
@@ -96,12 +100,12 @@ async def list_firmware_inputs(ctx: RunContextWrapper[Any]) -> str:
         access = require_firmware_permission(ctx, FirmwarePermission.METADATA_READ)
         inputs = [
             item.model_dump(mode="json")
-            for item in _service(ctx).list_inputs()
+            for item in firmware_service(ctx).list_inputs()
             if item.input_artifact_id in access.allowed_input_artifact_ids
         ]
-        return _success(inputs, message=f"Returned {len(inputs)} firmware inputs.")
+        return success_result(inputs, message=f"Returned {len(inputs)} firmware inputs.")
     except FirmwareDomainError as exc:
-        return _failure(exc)
+        return failure_result(exc)
 
 
 @function_tool(timeout=30)
@@ -112,16 +116,16 @@ async def get_firmware_job(
     """Return full P1 metadata for one authorized firmware analysis job."""
     try:
         require_firmware_permission(ctx, FirmwarePermission.METADATA_READ)
-        record = _service(ctx).get_analysis(analysis_id)
+        record = firmware_service(ctx).get_analysis(analysis_id)
         require_firmware_permission(
             ctx,
             FirmwarePermission.METADATA_READ,
             input_artifact_id=record.input_artifact_id,
         )
-        return _success(
+        return success_result(
             record.model_dump(mode="json"),
             message="Firmware job metadata returned.",
             warnings=record.limitations,
         )
     except FirmwareDomainError as exc:
-        return _failure(exc)
+        return failure_result(exc)

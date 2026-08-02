@@ -108,7 +108,7 @@ def test_nested_symlinks_inside_linked_dir(tmp_path: Path) -> None:
     assert not (staged / "shared" / "escape").exists()
 
 
-def test_staged_path_has_no_symlink_ancestor(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+def test_staged_path_has_no_symlink_ancestor(tmp_path: Path, monkeypatch) -> None:
     """The staging directory itself must never sit behind a symlink.
 
     ``tempfile.mkdtemp()`` honors ``$TMPDIR``, and on macOS the default

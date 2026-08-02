@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 from strix.domains.product_security.firmware.errors import FirmwareDomainError
 from strix.domains.product_security.firmware.models import (
@@ -83,14 +83,22 @@ class FirmwareAccessIssuer:
 
 
 def require_firmware_permission(
-    context: Any,
+    context: object,
     permission: FirmwarePermission,
     *,
     input_artifact_id: str | None = None,
 ) -> FirmwareAccessContext:
-    inner = context if isinstance(context, dict) else getattr(context, "context", None)
-    access = inner.get("firmware_access") if isinstance(inner, dict) else None
-    agent_id = inner.get("agent_id") if isinstance(inner, dict) else None
+    if isinstance(context, dict):
+        inner = cast("dict[str, object]", context)
+    else:
+        raw_context = cast("object", getattr(context, "context", None))
+        inner = (
+            cast("dict[str, object]", raw_context)
+            if isinstance(raw_context, dict)
+            else {}
+        )
+    access = inner.get("firmware_access")
+    agent_id = inner.get("agent_id")
     if not isinstance(access, FirmwareAccessContext):
         raise _access_denied("Trusted firmware access context is missing.")
     if agent_id != access.agent_id:

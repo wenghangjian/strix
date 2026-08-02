@@ -28,8 +28,8 @@ class FirmwarePermission(StrEnum):
     SUMMARY_READ = "firmware.summary.read"
     METADATA_READ = "firmware.metadata.read"
     CONTENT_PREVIEW = "firmware.content.preview"
-    SECRET_FINGERPRINT_READ = "firmware.secret.fingerprint.read"  # noqa: S105
-    SECRET_REVEAL = "firmware.secret.reveal"  # noqa: S105
+    SECRET_FINGERPRINT_READ = "firmware.secret.fingerprint.read"  # noqa: S105  # nosec B105
+    SECRET_REVEAL = "firmware.secret.reveal"  # noqa: S105  # nosec B105
     WORKER_EXECUTE = "firmware.worker.execute"
     BINARY_INSPECT = "firmware.binary.inspect"
     BINARY_DISASSEMBLE = "firmware.binary.disassemble"
@@ -37,6 +37,10 @@ class FirmwarePermission(StrEnum):
     HINT_CREATE = "firmware.hint.create"
     RECIPE_CREATE = "firmware.recipe.create"
     CANDIDATE_CREATE = "firmware.candidate.create"
+
+
+def _empty_permissions() -> frozenset[FirmwarePermission]:
+    return frozenset()
 
 
 class FirmwareGeometryContract(BaseModel):
@@ -92,7 +96,7 @@ class FirmwareAccessContext(BaseModel):
     agent_id: str = Field(min_length=1)
     role_id: str = Field(min_length=1)
     allowed_input_artifact_ids: frozenset[str] = Field(default_factory=frozenset)
-    permissions: frozenset[FirmwarePermission] = Field(default_factory=frozenset)
+    permissions: frozenset[FirmwarePermission] = Field(default_factory=_empty_permissions)
     access_profile: str = Field(default="firmware-none-v1", min_length=1)
     issued_by: Literal["scan_runner"]
 
