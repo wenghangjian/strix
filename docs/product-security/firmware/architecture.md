@@ -16,7 +16,7 @@ The firmware implementation extends these components; it does not replace `run_s
 
 ### Tool Exposure
 
-`ProductSecurityRuntime` currently exposes one tool tuple to both Root and children. P1 splits it into:
+`ProductSecurityRuntime` exposes separate tool tuples to Root and children:
 
 - `root_tools`: existing domain tools plus redacted firmware summaries.
 - `role_tools`: the complete Product Security tool set filtered by `RoleProfile.allowed_tool_names`.
@@ -36,6 +36,14 @@ SQLite metadata and filesystem blobs use a recoverable commit state machine beca
 ### Ingestion
 
 Configured `artifacts` are ingested before Agent execution. The importer opens each source once with no-follow semantics, validates the opened descriptor as a regular file, streams hash and copy from that descriptor, rechecks descriptor metadata, then atomically registers an immutable input artifact. Agents receive IDs and labels only.
+
+Resume mode verifies and reuses the CAS copy without reopening the original host path. This allows a scan to resume after the source artifact has moved while still failing closed if the stored blob no longer matches its SHA-256 identity.
+
+## P1 Implementation Status
+
+P1a and P1b are implemented on `codex/secondary-development`. The runtime now provides immutable descriptor-based ingestion, SHA-256 CAS storage, recoverable SQLite metadata, trusted access issuance on child start and respawn, root/role tool separation, typed firmware query and queue tools, and disabled-profile isolation.
+
+The P1 execution tool creates a deterministic `queued` analysis record only. It does not invoke Docker, parse the image, extract a filesystem, or produce a completed finding. Those behaviors begin in P2a and later slices.
 
 ### Candidate Findings
 
@@ -58,3 +66,5 @@ P3 is the first useful internal firmware-analysis milestone. P5 is the first pro
 All verification runs on Ubuntu 22.04 amd64. The host has Docker with AppArmor, seccomp, and cgroup namespace support, 15 GiB RAM, and sufficient disk for the 4 GiB one-shot worker limit. Deployment uses the Git checkout under `/srv/penoops/repository`; the earlier copied tree under `/srv/penoops/strix` is retained only as historical validation output and is not release evidence.
 
 P0 baseline at commit `f8f9fba` completed on 2026-08-02: `627 passed` in 238.73 seconds. The only output was two existing Pydantic instance-level `model_fields` deprecation warnings in `strix/config/loader.py`.
+
+P1 code verification at commit `850af09` completed on 2026-08-02: `666 passed` in 276.66 seconds and the full Ruff gate passed. Exact command results, scoped security/type gates, and repository-wide baseline exceptions are recorded in `p1-verification.md`.

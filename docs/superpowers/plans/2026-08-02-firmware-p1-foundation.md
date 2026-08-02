@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3.12+, Pydantic v2, standard-library `sqlite3`, SHA-256 CAS, OpenAI Agents SDK function tools, pytest, Ruff, mypy, pyright, Bandit.
 
+**Execution Status (2026-08-02):** Tasks 1-6 are implemented and P1 acceptance is complete at code commit `850af09`. Task 7 passed full pytest/Ruff plus all P1-scoped gates. Repository-wide mypy, pyright, and Bandit retain pre-existing baseline findings documented in `docs/product-security/firmware/p1-verification.md`; no broad ignores were introduced.
+
 ## Global Constraints
 
 - Product Security remains opt-in; disabled and ordinary scans must not create firmware state or tools.
