@@ -1,6 +1,8 @@
 # Product Security Phase 3 Firmware Analysis Design
 
-**Status:** Revised after architecture review
+**Status:** Approved worker security contract
+
+**Parent design:** `docs/product-security/firmware/design.md`. The parent design governs product behavior, Agent integration, persistence, and delivery phases. This document governs worker isolation, format handling, completeness, and verifier invariants. If they conflict, use the stricter security requirement and record the resolution in the implementation plan.
 
 ## Goal
 
