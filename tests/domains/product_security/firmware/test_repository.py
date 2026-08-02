@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from strix.domains.product_security.firmware.errors import FirmwareDomainError
 from strix.domains.product_security.firmware.models import FirmwareInputArtifact
 from strix.domains.product_security.firmware.repository import FirmwareRepository
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _artifact(data: bytes, *, artifact_id: str | None = None) -> FirmwareInputArtifact:
@@ -92,7 +96,7 @@ def test_recovery_completes_valid_interrupted_commit(
     repo.initialize()
     data = f"firmware-{crash_state}".encode()
     artifact = _artifact(data)
-    original = repo._transition_commit  # noqa: SLF001
+    original = repo._transition_commit
 
     def crash_after_transition(commit_id: str, state: str) -> None:
         original(commit_id, state)
@@ -117,14 +121,14 @@ def test_recovery_rejects_corrupt_promoted_blob(tmp_path: Path) -> None:
     repo.initialize()
     data = b"firmware-corrupt"
     artifact = _artifact(data)
-    original = repo._transition_commit  # noqa: SLF001
+    original = repo._transition_commit
 
     def crash_after_blob(commit_id: str, state: str) -> None:
         original(commit_id, state)
         if state == "blobs_committed":
             raise RuntimeError("simulated process crash")
 
-    repo._transition_commit = crash_after_blob  # type: ignore[method-assign]  # noqa: SLF001
+    repo._transition_commit = crash_after_blob  # type: ignore[method-assign]
     with pytest.raises(RuntimeError):
         repo.register_input(_staged(repo, data), artifact)
     repo.blob_path(artifact.sha256).write_bytes(b"corrupt")
