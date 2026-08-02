@@ -8,6 +8,8 @@ from agents.tool_context import ToolContext
 
 from strix.core import execution
 from strix.core.agents import AgentCoordinator
+from strix.domains.product_security.firmware.access import FirmwareAccessIssuer
+from strix.domains.product_security.firmware.models import FirmwarePermission
 from strix.domains.product_security.roles.registry import default_role_registry
 from strix.tools.agents_graph.tools import create_agent, view_agent_graph
 
@@ -237,7 +239,11 @@ async def test_spawn_child_agent_persists_role_metadata(monkeypatch: pytest.Monk
         run_config=object(),  # type: ignore[arg-type]
         max_turns=1,
         interactive=False,
-        parent_ctx={"agent_id": "root", "product_security_roles": default_role_registry()},
+        parent_ctx={
+            "agent_id": "root",
+            "product_security_roles": default_role_registry(),
+            "firmware_access_issuer": FirmwareAccessIssuer(scan_id="scan-1"),
+        },
         name="Firmware Analyst",
         task="Analyze firmware",
         skills=[],
@@ -253,14 +259,18 @@ async def test_spawn_child_agent_persists_role_metadata(monkeypatch: pytest.Monk
     assert snapshot["metadata"][child_id]["skills"] == ["product_security/firmware_analysis"]
     assert built[0]["role_profile"].role_id == "firmware_analyst"
     assert started
+    assert started[0]["firmware_access"].agent_id == child_id
+    assert FirmwarePermission.WORKER_EXECUTE in started[0]["firmware_access"].permissions
 
 
 @pytest.mark.asyncio
 async def test_respawn_subagents_restores_role_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_start_child_runner(**_kwargs: Any) -> None:
-        return None
+    started: list[dict[str, Any]] = []
+
+    async def fake_start_child_runner(**kwargs: Any) -> None:
+        started.append(kwargs)
 
     monkeypatch.setattr(execution, "_start_child_runner", fake_start_child_runner)
     coordinator = AgentCoordinator()
@@ -290,8 +300,14 @@ async def test_respawn_subagents_restores_role_profile(
         run_config=object(),  # type: ignore[arg-type]
         max_turns=1,
         interactive=False,
-        parent_ctx={"agent_id": "root", "product_security_roles": default_role_registry()},
+        parent_ctx={
+            "agent_id": "root",
+            "product_security_roles": default_role_registry(),
+            "firmware_access_issuer": FirmwareAccessIssuer(scan_id="scan-1"),
+        },
         root_id="root",
     )
 
     assert built[0]["role_profile"].role_id == "firmware_analyst"
+    assert started[0]["firmware_access"].agent_id == "child"
+    assert FirmwarePermission.WORKER_EXECUTE in started[0]["firmware_access"].permissions
