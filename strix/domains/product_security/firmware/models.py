@@ -16,13 +16,24 @@ if TYPE_CHECKING:
 FirmwareAnalysisStatus = Literal[
     "queued",
     "running",
+    "created",
+    "receiving",
+    "analyzing",
+    "verified",
+    "committing",
     "complete",
     "partial",
     "failed",
     "rejected",
+    "timed_out",
+    "protocol_error",
+    "cancelled",
+    "corrupt",
     "detected_unsupported",
+    "not_applicable",
     "unclassified",
 ]
+
 
 class FirmwarePermission(StrEnum):
     SUMMARY_READ = "firmware.summary.read"

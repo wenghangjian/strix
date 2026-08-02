@@ -6,9 +6,11 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import BinaryIO
 
 from strix.domains.product_security.firmware.errors import FirmwareDomainError
 from strix.domains.product_security.firmware.models import (
@@ -119,6 +121,30 @@ class FirmwareRepository:
             rows = connection.execute(query, parameters).fetchall()
         return [_input_from_row(row) for row in rows]
 
+    def open_input_reader(self, input_artifact_id: str) -> BinaryIO:
+        """Open and verify one immutable CAS input without exposing its path."""
+        artifact = self.get_input(input_artifact_id)
+        path = self.blob_path(artifact.sha256)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            raise _corrupt_input_error(input_artifact_id) from exc
+
+        reader = os.fdopen(descriptor, "rb")
+        try:
+            _verify_input_reader(reader, artifact)
+        except BaseException:
+            reader.close()
+            raise
+        reader.seek(0)
+        return reader
+
     def create_analysis(self, record: FirmwareAnalysisRecord) -> FirmwareAnalysisRecord:
         existing = self._find_analysis(record.analysis_id)
         if existing is not None:
@@ -160,6 +186,37 @@ class FirmwareRepository:
                 retryable=False,
             )
         return record
+
+    def transition_analysis(
+        self,
+        analysis_id: str,
+        expected: set[str],
+        target: str,
+    ) -> None:
+        """Atomically move an analysis when its current state is expected."""
+        if not expected:
+            raise ValueError("Expected analysis states must not be empty.")
+        current = self.get_analysis(analysis_id)
+        FirmwareAnalysisRecord.model_validate(
+            {**current.model_dump(mode="python"), "status": target}
+        )
+        placeholders = ", ".join("?" for _ in expected)
+        parameters = (target, analysis_id, *sorted(expected))
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE firmware_analysis
+                SET status = ?
+                WHERE analysis_id = ? AND status IN ({placeholders})
+                """,  # noqa: S608 - placeholders are generated, values remain parameters.
+                parameters,
+            )
+            if cursor.rowcount != 1:
+                raise FirmwareDomainError(
+                    "FIRMWARE_ANALYSIS_STATE_CONFLICT",
+                    "Firmware analysis state changed before the requested transition.",
+                    retryable=True,
+                )
 
     def list_analyses(self, *, scan_id: str | None = None) -> list[FirmwareAnalysisRecord]:
         query = "SELECT * FROM firmware_analysis"
@@ -384,6 +441,32 @@ def _hash_file(path: Path) -> tuple[str, int]:
             digest.update(chunk)
             size += len(chunk)
     return digest.hexdigest(), size
+
+
+def _hash_reader(reader: BinaryIO) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    while chunk := reader.read(1024 * 1024):
+        digest.update(chunk)
+        size += len(chunk)
+    return digest.hexdigest(), size
+
+
+def _verify_input_reader(reader: BinaryIO, artifact: FirmwareInputArtifact) -> None:
+    metadata = os.fstat(reader.fileno())
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != artifact.size_bytes:
+        raise _corrupt_input_error(artifact.input_artifact_id)
+    actual_hash, actual_size = _hash_reader(reader)
+    if actual_hash != artifact.sha256 or actual_size != artifact.size_bytes:
+        raise _corrupt_input_error(artifact.input_artifact_id)
+
+
+def _corrupt_input_error(input_artifact_id: str) -> FirmwareDomainError:
+    return FirmwareDomainError(
+        "FIRMWARE_ARTIFACT_CORRUPT",
+        f"Firmware input '{input_artifact_id}' failed immutable CAS verification.",
+        retryable=False,
+    )
 
 
 def _fsync_directory(path: Path) -> None:
