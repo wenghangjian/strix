@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -15,6 +13,7 @@ from strix.domains.product_security.firmware.repository import FirmwareRepositor
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
 
 def _repo(tmp_path: Path) -> FirmwareRepository:
@@ -135,4 +134,4 @@ def test_ingestion_cleans_staging_after_failure(tmp_path: Path) -> None:
         )
 
     assert not any(repo.staging_root.iterdir())
-    assert os.path.isfile(source)
+    assert source.is_file()

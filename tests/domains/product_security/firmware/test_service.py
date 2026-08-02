@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -9,6 +9,10 @@ from strix.domains.product_security.firmware.errors import FirmwareDomainError
 from strix.domains.product_security.firmware.models import FirmwareInputArtifact
 from strix.domains.product_security.firmware.repository import FirmwareRepository
 from strix.domains.product_security.firmware.service import FirmwareAnalysisService
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _registered_input(repo: FirmwareRepository, *, scan_id: str) -> FirmwareInputArtifact:
