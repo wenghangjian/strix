@@ -32,6 +32,7 @@ from strix.core.sessions import (
     open_agent_session,
     strip_all_images_from_session,
 )
+from strix.domains.product_security.firmware.access import FirmwareAccessIssuer
 from strix.domains.product_security.roles.registry import RoleRegistry
 from strix.llm.compaction import is_context_overflow, maybe_compact
 
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
     from agents.result import RunResultBase
 
     from strix.core.agents import AgentCoordinator, Status
+    from strix.domains.product_security.firmware.models import FirmwareAccessContext
 
 
 logger = logging.getLogger(__name__)
@@ -283,6 +285,7 @@ async def spawn_child_agent(
             task=task,
             parent_history=parent_history,
         ),
+        firmware_access=_firmware_access_for_role(parent_ctx, child_id, role_profile),
         event_sink=event_sink,
         hooks=hooks,
     )
@@ -366,6 +369,11 @@ async def respawn_subagents(
                 parent_id=parent_id,
                 task=str(md.get("task", "")),
                 initial_input=[],
+                firmware_access=_firmware_access_for_role(
+                    parent_ctx,
+                    child_id,
+                    role_profile,
+                ),
                 start_parked=start_parked,
                 event_sink=event_sink,
                 hooks=hooks,
@@ -733,6 +741,7 @@ async def _start_child_runner(
     parent_id: str | None,
     task: str,
     initial_input: Any,
+    firmware_access: FirmwareAccessContext | None = None,
     start_parked: bool = False,
     event_sink: StreamEventSink | None = None,
     hooks: RunHooks[dict[str, Any]] | None = None,
@@ -745,6 +754,8 @@ async def _start_child_runner(
     child_ctx["agent_id"] = child_id
     child_ctx["parent_id"] = parent_id
     child_ctx["task"] = task
+    if firmware_access is not None:
+        child_ctx["firmware_access"] = firmware_access
 
     async def _child_loop() -> None:
         # A budget stop is a clean scan-wide shutdown, not a child failure: the
@@ -779,6 +790,17 @@ async def _start_child_runner(
 def _product_security_registry(ctx: dict[str, Any]) -> RoleRegistry | None:
     registry = ctx.get("product_security_roles")
     return registry if isinstance(registry, RoleRegistry) else None
+
+
+def _firmware_access_for_role(
+    parent_ctx: dict[str, Any],
+    agent_id: str,
+    role_profile: Any | None,
+) -> FirmwareAccessContext | None:
+    issuer = parent_ctx.get("firmware_access_issuer")
+    if not isinstance(issuer, FirmwareAccessIssuer) or role_profile is None:
+        return None
+    return issuer.issue(agent_id=agent_id, role_profile=role_profile)
 
 
 def _merge_skills(role_skills: list[str], requested_skills: list[str]) -> list[str]:
