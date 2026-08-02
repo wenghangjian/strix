@@ -63,7 +63,7 @@ def test_input_artifact_validates_sha256_and_hides_host_path() -> None:
     )
 
     assert artifact.created_at.tzinfo == UTC
-    assert "source_path" not in artifact.model_fields
+    assert "source_path" not in type(artifact).model_fields
 
     with pytest.raises(ValidationError):
         FirmwareInputArtifact.model_validate(
