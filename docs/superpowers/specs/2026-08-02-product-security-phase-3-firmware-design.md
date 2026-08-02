@@ -1,240 +1,107 @@
 # Product Security Phase 3 Firmware Analysis Design
 
-**Status:** Approved for implementation planning
+**Status:** Revised after architecture review
 
-**Source requirements:** Product Security Domain Pack task specification, Phase 3
+## Goal
 
-## Objective
+Add offline, resume-safe firmware inspection to the opt-in Product Security profile. Imported content is never mounted or executed, and extractor exit codes never determine completeness by themselves.
 
-Add resume-safe, offline firmware analysis to the opt-in Product Security profile without executing extracted content or replacing Strix's existing agent and sandbox lifecycle.
+## Trust Boundary
 
-The Phase 3 vertical slice imports firmware artifacts, identifies embedded content, extracts supported filesystems with strict limits, inventories files, inspects ELF metadata and strings, records redacted credential/key candidates, and publishes structured planner hints.
+Firmware parsing runs in a dedicated one-shot container, separate from the normal Strix scan sandbox. The host copies in one immutable input and receives only a JSON manifest plus generated regular-file blobs.
 
-## Decision
+The container has `network=none`, no mounts or devices, all capabilities dropped, `no-new-privileges`, a non-root user without sudo, a read-only root filesystem, bounded `noexec` tmpfs work storage, PID/memory/CPU limits, and a seccomp profile denying mount, namespace, ptrace, module, device, and networking syscalls. It is destroyed after each analysis. The security claim is limited to audited fixed-argument dispatch and container containment; seccomp is not treated as an executable-path allowlist.
 
-Binwalk is a detector, not the extraction authority and not the completeness oracle.
+The host treats worker output as untrusted. It accepts only generated blob names, rechecks count and size limits, copies without following links, recomputes every SHA-256, validates the JSON schema and parent ranges, and atomically persists the result. Any mismatch rejects the whole staging result.
 
-The pipeline uses three independent layers:
+Ubuntu 22.04 is the Docker host. A separate firmware-worker image uses a digest-pinned Linux base and pinned source/lockfiles; its exact image digest and tool versions form part of the resume key.
 
-1. Discovery identifies signatures, offsets, entropy regions, and candidate formats.
-2. Format-specific extractors unpack only explicitly supported formats.
-3. A post-extraction verifier decides whether extraction is complete, partial, failed, or rejected.
+## Data Model And Pipeline
 
-A zero process exit code is necessary but never sufficient for extraction success. Warnings, empty regular-file output, incomplete metadata, limit violations, and unsafe paths override the process exit code.
+A content-addressed `Blob` stores SHA-256, size, and generated storage name. An `ArtifactNode` represents one occurrence and stores its parent, blob ID, depth, selected adapter, observations, attempts, required children, and status. Its typed relation is `input`, `carve`, `normalized`, or `extracted`: only `carve` has a parent byte `source_span`; normalized nodes store logical addresses, while extracted nodes store archive-member or filesystem inode provenance. Identical bytes can therefore be deduplicated without losing lineage.
 
-## Supported MVP Formats
+1. **Observe:** `file` and Binwalk 3.1.0 record advisory signatures only.
+2. **Normalize:** validated Intel HEX or S-record inputs become bounded contiguous binary blobs.
+3. **Partition:** validated MBR/GPT images produce bounded partition nodes.
+4. **Extract:** one preflight-approved archive or filesystem adapter exports generated regular-file blobs.
+5. **Inspect:** bounded ELF metadata, strings, configuration, services, and redacted credential candidates are collected.
+6. **Verify:** an independent verifier checks attempts and deterministically aggregates required children.
 
-- TAR archives through a trusted Python standard-library extractor.
-- ZIP archives through a trusted Python standard-library extractor.
-- SquashFS images through `unsquashfs` after metadata preflight, with one
-  bounded `7z` attempt allowed only when the primary result is partial or failed.
+Advisory observations never create required children or change status. Only an adapter that passes strict format preflight may select a range and create required children. Adapter precedence is records, partition table, filesystem, then archive; ambiguous structural matches are reported as `detected_unsupported` rather than tried recursively.
 
-Binwalk v3.1.0 is pinned for signature discovery only. The pipeline does not invoke recursive `binwalk -eM` extraction. Unsupported detected formats remain visible in the analysis with `detected_unsupported` status instead of being reported as successfully extracted.
+## Supported Formats
 
-The sandbox image also provides `file`, `strings`, `readelf`, `objdump`,
-`squashfs-tools`, and `7z`. Tool names and versions are recorded in every
-analysis result.
+### TAR And ZIP
 
-## Component Boundaries
+Python adapters preflight the full member table, canonicalize names for metadata, and stream regular members into generated blob IDs. They reject absolute/UNC/drive paths, traversal, normalized-name collisions, links, devices, TAR sparse entries, encrypted ZIPs, unsupported compression, malformed PAX data, and inconsistent declared sizes. ZIP CRCs and actual emitted bytes are verified. ZIP64 is accepted only within global limits. Reservations are charged before and during streaming, and a rejected attempt discards its complete staging tree.
 
-### Firmware Models
+### SquashFS
 
-`strix/domains/product_security/firmware/models.py` owns:
+Pinned `unsquashfs -pf` output is parsed with its version-matched pseudo-file grammar to establish expected regular-file paths and logical bytes before extraction; unparsable entries reject preflight. The verifier walks staging with `lstat`, rejects links and special objects, compares expected and actual totals, and imports generated blobs only after success. Fixtures cover quoted names, newlines, and escaping. There is no `7z` fallback in Phase 3.
 
-- `FirmwareArtifact`
-- `FirmwareManifest`
-- `FirmwareFileEntry`
-- `FirmwareElfInfo`
-- `FirmwareCandidate`
-- `FirmwarePlannerHint`
-- `FirmwareAnalysis`
-- `FirmwareLimits`
+### EXT2/3/4
 
-The existing artifact service reads and writes:
+`e2fsck -fn` must pass before export. The adapter rejects unsupported incompatibility features, including encrypted filesystems. A repository-owned helper built against pinned `libext2fs` inventories directories and numeric inodes as length-delimited records containing inode IDs, sizes, modes, and base64 filename bytes; no line-oriented filename parsing is allowed. After global logical-size reservation, pinned `debugfs` dumps regular inodes individually to generated names. Original paths, inode aliases, hard-link relationships, newlines, and non-UTF-8 names remain lossless metadata. The verifier uses `lstat`/no-follow opens and compares expected inode, path, logical-size, and emitted-byte totals. Images are never mounted and journals are never replayed.
 
-- `domain/firmware/manifest.json`
-- `domain/firmware/analysis.json`
-- `domain/firmware/input/<firmware_id>/<original_name>`
-- `domain/firmware/extracted/<firmware_id>/...`
+### MBR/GPT Raw Disks
 
-Stable firmware IDs use the first 16 hexadecimal characters of the input SHA-256 with a `firmware-` prefix. Duplicate content produces one manifest entry even when submitted under different paths.
+The parser supports 512-byte logical sectors; 4096-byte sectors require explicit configuration or a uniquely valid GPT header at LBA1. GPT requires valid header and partition-array CRCs, primary/backup consistency, and in-range usable LBAs. MBR validates signatures and EBR chains; extended and protective entries are containers, not carved siblings. Hybrid MBR is reported unsupported. Every carve satisfies `offset >= 0`, `length > 0`, and `length <= parent_length - offset` before reading. `sfdisk` output may be recorded for diagnostics but is not the authority.
 
-### Firmware Importer
+### Intel HEX And Motorola S-record
 
-`strix/domains/product_security/firmware/ingestion.py` validates configured artifact paths, computes SHA-256 while streaming, rejects non-files and inputs above the configured limit, and atomically copies accepted bytes under `domain/firmware/input/`.
+A streaming record validator is the runtime authority and emits the canonical segment map directly. Lines, records, addresses, decoded bytes, and segments are bounded. Checksums, byte counts, Intel EOF/extended-address/start-address records, S5/S6 counts, and S7/S8/S9 termination are validated. Data after termination, conflicting entry addresses, address overflow, and any overlap are rejected; out-of-order non-overlapping data is sorted. One blob is emitted per contiguous range, so address gaps are never materialized as padding. Pinned `bincopy` is used only for differential tests, where addresses, lengths, entry point, and bytes must exactly match the canonical map.
 
-Import does not inspect or execute content. Import errors use stable structured codes.
+### Raw NAND/Flash Dumps
 
-### Sandbox Worker
+Phase 3 uses stable rule IDs. `FLASH_UBI_CRC_SEQUENCE` requires at least two CRC-valid UBI EC headers with valid offsets at one consistent power-of-two erase interval. `FLASH_JFFS2_CRC_SEQUENCE` requires at least two non-overlapping, same-endian JFFS2 node headers with valid magic, aligned bounded length, and header CRC. Either rule yields `detected_unsupported`; one valid header or OOB-like periodicity alone is weak evidence and yields `unclassified`. Geometry guessing and extraction are deferred until a typed, user-supplied geometry contract and positive fixtures are approved.
 
-`strix/domains/product_security/firmware/sandbox_worker.py` is a trusted, standard-library-first worker copied into the Strix sandbox image at build time. It receives fixed command-line arguments, never evaluates input-derived commands, and emits one JSON result.
+## Status Aggregation
 
-The worker performs:
+Each selected adapter first produces a local result:
 
-- SHA-256 verification against the imported manifest.
-- Whole-file entropy calculation.
-- `file` and Binwalk signature discovery.
-- Safe format dispatch.
-- Post-extraction validation.
-- File inventory and hashing.
-- ELF detection plus bounded `readelf` metadata.
-- Bounded printable-string scanning.
-- Certificate, private-key, credential, startup-script, web-root, service, and configuration candidates.
-- Planner hint generation.
+- `complete`: all adapter postconditions passed and extraction adapters emitted at least one regular file.
+- `partial`: useful blobs exist but an integrity/completeness condition failed.
+- `failed`: a supported adapter timed out, crashed, or emitted no useful regular file.
+- `rejected`: a local safety, range, path, type, or resource rule was violated; its staging tree is discarded.
+- `detected_unsupported`: a format passed preflight but has no safe enabled adapter, or structural matches are ambiguous.
+- `not_applicable`: no format passed adapter preflight.
+- `unclassified`: flash-like input has only weak, non-format observations.
 
-No extracted executable or script is invoked. `readelf`, `strings`, and `file` only read bytes.
+Aggregation is deterministic and never upgrades the local result. A local `rejected`, `partial`, or `failed` remains so. A local `complete` remains complete only when every required-analysis child is `complete` or `not_applicable`; otherwise it becomes `partial`. Produced-file children are inventory edges and do not require recursive analysis unless separately promoted to required-analysis edges. With no useful output, `detected_unsupported`, `not_applicable`, or `unclassified` is retained. Advisory observations do not participate. Directory-only extraction is always `failed`.
 
-### Host Pipeline
+## Components And Authorization
 
-`strix/domains/product_security/firmware/pipeline.py` is the host-side orchestrator. It obtains the existing run-scoped `sandbox_session` from the SDK tool context, streams the imported firmware into `/workspace/.strix/firmware/<firmware_id>/input`, invokes the baked worker with `shell=False`, reads the worker result and validated extracted files, and persists them through `ArtifactRepository`.
+- `firmware/models.py`: blob, occurrence node, attempts, limits, findings, and analysis schemas.
+- `firmware/formats/`: streaming record, partition, archive, SquashFS, EXT, and flash-observation adapters.
+- `firmware/verifier.py`: independent range, path, type, reservation, hash, and status checks.
+- `firmware/worker.py`: fixed-argument graph traversal baked into the dedicated image.
+- `firmware/container.py`: creates the restricted container and transfers untrusted results.
+- `firmware/ingestion.py` and `pipeline.py`: atomic import, persistence, resume, and lifecycle.
+- `firmware/tools.py`: analyst-only execution tools and redacted result readers.
 
-Only files listed by a successful worker validation are copied back to the run directory. The host independently rechecks relative paths, file counts, and byte totals before persistence.
+Firmware execution tools are not registered on the root agent. Child runtime context carries a trusted `product_security_role_id`, and every execution tool checks it server-side. Generic artifact queries deny `firmware/input`, `firmware/extracted`, and `firmware/blobs`; other roles receive only redacted firmware findings and planner hints.
 
-Completed analyses are idempotent by input SHA-256, analysis schema version, limits, and toolchain fingerprint. Resume returns the existing valid result instead of re-extracting.
+Binwalk is detection-only. The worker image also pins e2fsprogs, squashfs-tools, `file`, binutils, and the worker source. Runtime executables are invoked only through an audited absolute-path dispatch table with argument arrays; the image contains no shell or package manager.
 
-### SDK Tools And Role Isolation
+## Limits
 
-Phase 3 adds run-scoped tools:
+Defaults are 512 MiB input, 1 GiB total logical output, 128 MiB per logical file, 20,000 paths, 20,000 unique blobs, 1,024 partitions, 1,024 normalized segments, recursion depth 3, 180 seconds per adapter, and 30 seconds per inspection command. The one-shot container uses 2 CPUs, 64 PIDs, 4 GiB memory with no swap, and a 2 GiB tmpfs: input plus accepted/current staging is bounded to 1.5 GiB. Parsers stream or memory-map input except pinned Binwalk 3.1.0, which is budgeted one additional input-sized allocation; the remaining memory is headroom for process and metadata overhead. Logical reservations prevent sparse content from bypassing limits; actual writes are counted independently. Resource exhaustion is `rejected` and forces teardown. Tool output and secret previews are bounded and redacted.
 
-- `get_firmware_manifest`
-- `analyze_firmware`
-- `get_firmware_analysis`
+The canonical resume key hashes input SHA-256/size, schema version, all limits and geometry configuration, enabled adapters, worker image digest, seccomp/security-policy digest, tool versions, and inspection-rule version. Resume revalidates persisted blob hashes and never reuses an interrupted or uncommitted staging directory.
 
-Only `firmware_analyst` receives these tools. The root and test-planner roles may read `firmware/analysis.json` through the existing safe artifact query tool, but cannot run firmware extraction.
+## Ubuntu Verification Gate
 
-The firmware skill instructs the agent to treat `partial`, `failed`, and `rejected` results as incomplete work, not as an empty but successful filesystem.
+All verification runs on the configured Ubuntu host:
 
-## Extraction Completeness Contract
+- Inspect container configuration and prove network, mount, loop, privilege escalation, and device attempts fail; unit-test that all orchestrator process launches pass through the absolute-path dispatch table and never use extracted paths as executables or scripts.
+- Test exact image/tool versions, a maximum-size Binwalk scan under the 4 GiB cgroup, deterministic OOM/ENOSPC rejection, and clean one-shot teardown after success, timeout, crash, and malformed output.
+- Cover TAR/ZIP collisions, encryption, ZIP64, CRC errors, sparse/PAX cases, links, special files, and dishonest sizes.
+- Cover EXT2/3/4 corruption, unsupported features, sparse files, hard links, directory-only images, newline/non-UTF-8 filename bytes, and inode/path count mismatches.
+- Cover 512/4096 GPT, CRC and backup damage, conventional/extended MBR, hybrid rejection, overlaps, overflow, truncation, and property-tested range arithmetic.
+- Cover HEX/S-record checksum, count/control records, overlap, ordering, termination, overflow, large gaps, and streaming limits.
+- Cover flash observations without claiming extraction and nested aggregation conflicts without advisory false-positive pollution.
+- Run Product Security authorization/disabled-profile tests, resume/idempotency tests, the full repository suite, Ruff, mypy, package build, and dedicated image smoke tests.
 
-`FirmwareAnalysis.extraction_status` is one of:
+## Deferred
 
-- `not_attempted`: no supported extraction candidate was found.
-- `complete`: all safety and completeness postconditions passed.
-- `partial`: regular files exist, but warnings or completeness checks failed.
-- `failed`: the extractor failed, timed out, or produced no regular files.
-- `rejected`: preflight or runtime safety limits were violated.
-
-`complete` requires all of the following:
-
-- At least one regular file exists.
-- The output is not directory-only.
-- Every output path is relative and remains below the extraction root.
-- No symlink, hard link, device, FIFO, or socket is accepted in the MVP.
-- File count, single-file size, and total extracted bytes remain within limits.
-- For SquashFS, actual output does not contradict available superblock file-count and size metadata.
-- No extractor warning classified as integrity-affecting remains unresolved.
-
-Warnings are persisted as structured `warning_codes` and bounded messages. Warning text never controls the result by itself; deterministic postconditions do.
-
-If `unsquashfs` returns `partial` or `failed`, the MVP may run one bounded
-`7z` extraction attempt against the same carved SquashFS image. TAR and ZIP
-have no fallback extractor. The pipeline never recursively tries arbitrary
-external tools. The final result preserves every attempt and explains which
-attempt, if any, was accepted.
-
-## Default Safety Limits
-
-- Maximum imported firmware size: 512 MiB.
-- Maximum extracted regular files: 20,000.
-- Maximum total extracted bytes: 1 GiB.
-- Maximum single extracted file: 128 MiB.
-- Maximum nested archive depth: 3.
-- Maximum printable strings retained per file: 200.
-- Maximum candidate message length: 512 characters.
-- Extractor timeout: 180 seconds.
-- Per-inspection-command timeout: 30 seconds.
-
-Limits are represented by `FirmwareLimits`, stored in the analysis, and passed as explicit worker arguments. Limit failures are not retryable without a deliberate configuration change.
-
-## Credential And Key Handling
-
-The pipeline records candidate type, file path, line number when available, confidence, and a rule identifier. It never records a complete password, token, private key, or certificate body.
-
-Candidate previews replace the matched value with `<redacted>` and are capped at 160 characters. Tests use obvious synthetic values that are not valid production credentials.
-
-## Planner Feedback
-
-`FirmwareAnalysis.planner_hints` contains auditable, non-executable recommendations with source references such as:
-
-- Telnet configuration -> authentication and default-credential test path.
-- Web root or HTTP daemon configuration -> embedded web attack-surface path.
-- Upgrade verification strings -> firmware-signature validation path.
-- Private-key candidate -> secret-protection and device-identity path.
-- ELF network-service binary -> service-specific binary and runtime test path.
-
-The pipeline does not mutate `test_plan.json`. The Test Planning Agent consumes the persisted hints and decides whether to add or revise paths.
-
-## Structured Errors
-
-At minimum, the pipeline distinguishes:
-
-- `FIRMWARE_INPUT_NOT_FOUND`
-- `FIRMWARE_INPUT_TOO_LARGE`
-- `FIRMWARE_HASH_MISMATCH`
-- `FIRMWARE_TOOL_MISSING`
-- `FIRMWARE_FORMAT_UNSUPPORTED`
-- `FIRMWARE_EXTRACTION_TIMEOUT`
-- `FIRMWARE_EXTRACTION_EMPTY`
-- `FIRMWARE_EXTRACTION_PARTIAL`
-- `FIRMWARE_EXTRACTION_LIMIT_EXCEEDED`
-- `FIRMWARE_PATH_TRAVERSAL_BLOCKED`
-- `FIRMWARE_SPECIAL_FILE_BLOCKED`
-- `FIRMWARE_ANALYSIS_FAILED`
-
-Tool responses retain the existing `{success, error_code, error, ...}` convention. Raw subprocess output is bounded and stored only when it does not contain sensitive material.
-
-## Test Design
-
-All verification runs on the Ubuntu deployment host.
-
-### Unit And Security Tests
-
-- Duplicate firmware input deduplicates by SHA-256.
-- ZIP and TAR fixtures extract regular files and produce manifests.
-- Absolute paths and `..` traversal entries are rejected before writes.
-- Symlink, hard-link, and special-file entries are rejected.
-- Directory-only output is `failed`, never `complete`.
-- Excess file count, single-file size, total size, nesting, and timeout are rejected.
-- Warnings with valid but incomplete output produce `partial`.
-- Credential and private-key previews are redacted.
-- Extracted content is never executed.
-
-### Docker Integration Fixture
-
-The Ubuntu test creates a deterministic SquashFS fixture at runtime. It contains:
-
-- A copied harmless ELF fixture used only as bytes.
-- `/etc/device.conf` with a synthetic test credential.
-- A startup script stored as non-executed content.
-- A minimal web-root file.
-- A service configuration referencing Telnet.
-
-The test verifies filesystem identification, extraction, regular-file inventory, ELF architecture, redacted credential discovery, service inference, planner hints, and persisted manifest/analysis artifacts.
-
-No real firmware image, real credential, or generated extraction directory is committed.
-
-### Compatibility And Regression
-
-- Product Security profile disabled: no firmware tools are registered.
-- Non-firmware scans retain existing tool sets and behavior.
-- Firmware tool registration remains role-scoped.
-- Resume reuses a valid persisted analysis.
-- Phase 1-2 targeted tests remain green.
-- The complete repository test suite, touched-path Ruff, and touched-path mypy run on Ubuntu.
-- The Strix sandbox image is rebuilt and its default entrypoint smoke test is repeated on Ubuntu.
-
-## Non-Goals
-
-- Generic recursive Binwalk extraction.
-- Automatic execution or emulation of firmware binaries.
-- Ghidra headless analysis.
-- UBIFS, JFFS2, YAFFS, CramFS, vendor-encrypted containers, and arbitrary bare-metal symbol recovery.
-- Automated exploitation or firmware patching.
-- Protocol actions, policy approvals, or validation lifecycle changes from Phases 4-5.
-
-Unsupported formats are reported honestly and remain available for a later adapter without weakening the MVP safety contract.
-
-## External References
-
-- Binwalk v3 repository: https://github.com/ReFirmLabs/binwalk
-- Binwalk v3.1.0 release: https://github.com/ReFirmLabs/binwalk/releases/tag/v3.1.0
+UBI/UBIFS, JFFS2, YAFFS, CramFS, vendor encryption, emulation, Ghidra, exploitation, and firmware patching require separate adapters and threat review.
