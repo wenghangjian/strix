@@ -556,6 +556,7 @@ def make_child_factory(
     interactive: bool = False,
     chat_completions_tools: bool = False,
     system_prompt_context: dict[str, Any] | None = None,
+    extra_tools: Sequence[Tool] | None = None,
 ) -> Any:
     """Return the runner-owned builder used by ``spawn_child_agent``.
 
@@ -564,7 +565,28 @@ def make_child_factory(
     without the graph tool knowing about runner internals.
     """
 
-    def _factory(*, name: str, skills: list[str]) -> SandboxAgent[Any]:
+    def _factory(
+        *,
+        name: str,
+        skills: list[str],
+        role_profile: Any | None = None,
+    ) -> SandboxAgent[Any]:
+        child_prompt_context = system_prompt_context
+        child_extra_tools = extra_tools
+        if role_profile is not None:
+            role_payload = (
+                role_profile.model_dump(mode="json")
+                if hasattr(role_profile, "model_dump")
+                else dict(role_profile)
+            )
+            child_prompt_context = {
+                **(system_prompt_context or {}),
+                "product_security_role": role_payload,
+            }
+            allowed_tool_names = set(role_payload.get("allowed_tool_names") or [])
+            child_extra_tools = [
+                tool for tool in (extra_tools or ()) if tool.name in allowed_tool_names
+            ]
         return build_strix_agent(
             name=name,
             skills=skills,
@@ -573,7 +595,8 @@ def make_child_factory(
             is_whitebox=is_whitebox,
             interactive=interactive,
             chat_completions_tools=chat_completions_tools,
-            system_prompt_context=system_prompt_context,
+            system_prompt_context=child_prompt_context,
+            extra_tools=child_extra_tools,
         )
 
     return _factory

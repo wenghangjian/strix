@@ -373,6 +373,9 @@ class ReportState:
                 "local_sources": config.get("local_sources", []),
                 "scope_mode": config.get("scope_mode", "auto"),
                 "diff_base": config.get("diff_base"),
+                "profile": config.get("profile"),
+                "documents": config.get("documents", []),
+                "artifacts": config.get("artifacts", []),
             }
         )
 

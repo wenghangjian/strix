@@ -847,6 +847,9 @@ class StrixTUIApp(App):  # type: ignore[misc]
             "scope_mode": getattr(args, "scope_mode", "auto"),
             "diff_base": getattr(args, "diff_base", None),
             "resume_instruction": getattr(args, "user_explicit_instruction", None) or "",
+            "profile": getattr(args, "profile", None),
+            "documents": getattr(args, "documents", None) or [],
+            "artifacts": getattr(args, "artifacts", None) or [],
         }
 
     def _setup_cleanup_handlers(self) -> None:

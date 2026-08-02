@@ -594,6 +594,35 @@ Examples:
     )
 
     parser.add_argument(
+        "--profile",
+        type=str,
+        choices=["product-security"],
+        default=None,
+        help="Enable an opt-in domain profile. Use 'product-security' for IoT/OT/product scans.",
+    )
+
+    parser.add_argument(
+        "--document",
+        dest="documents",
+        type=str,
+        action="append",
+        metavar="PATH",
+        help=(
+            "Product-security document input such as a manual, threat model, "
+            "or requirements file."
+        ),
+    )
+
+    parser.add_argument(
+        "--artifact",
+        dest="artifacts",
+        type=str,
+        action="append",
+        metavar="PATH",
+        help="Product-security artifact input such as firmware, SBOM, or traffic capture.",
+    )
+
+    parser.add_argument(
         "-n",
         "--non-interactive",
         action="store_true",
@@ -793,6 +822,9 @@ def _persist_run_record(args: argparse.Namespace) -> None:
         "diff_scope": getattr(args, "diff_scope", {"active": False}),
         "scope_mode": args.scope_mode,
         "diff_base": args.diff_base,
+        "profile": args.profile,
+        "documents": args.documents or [],
+        "artifacts": args.artifacts or [],
     }
     write_run_record(run_dir, run_record)
 
@@ -837,6 +869,9 @@ def _load_resume_state(args: argparse.Namespace, parser: argparse.ArgumentParser
         args.local_sources = state.get("local_sources")
     if state.get("diff_scope"):
         args.diff_scope = state.get("diff_scope")
+    args.profile = state.get("profile")
+    args.documents = state.get("documents") or []
+    args.artifacts = state.get("artifacts") or []
     persisted_scan_mode = state.get("scan_mode")
     if persisted_scan_mode and args.scan_mode == "deep":
         args.scan_mode = persisted_scan_mode

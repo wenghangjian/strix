@@ -32,6 +32,7 @@ from strix.core.sessions import (
     open_agent_session,
     strip_all_images_from_session,
 )
+from strix.domains.product_security.roles.registry import RoleRegistry
 from strix.llm.compaction import is_context_overflow, maybe_compact
 
 
@@ -228,6 +229,7 @@ async def spawn_child_agent(
     task: str,
     skills: list[str],
     parent_history: list[Any],
+    role: str | None = None,
     event_sink: StreamEventSink | None = None,
     hooks: RunHooks[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -236,13 +238,29 @@ async def spawn_child_agent(
         raise TypeError("Parent agent_id missing from context")
 
     child_id = uuid.uuid4().hex[:8]
-    child_agent = factory(name=name, skills=skills)
+    child_skills = list(skills)
+    metadata: dict[str, Any] = {}
+    role_profile = None
+    if role:
+        registry = _product_security_registry(parent_ctx)
+        if registry is None:
+            raise ValueError("Product Security role requested but domain registry is not enabled")
+        role_profile = registry.get(role)
+        child_skills = _merge_skills(role_profile.skills, child_skills)
+        metadata = {
+            "domain": "product_security",
+            "role_id": role_profile.role_id,
+            "risk_ceiling": role_profile.risk_ceiling,
+        }
+
+    child_agent = factory(name=name, skills=child_skills, role_profile=role_profile)
     await coordinator.register(
         child_id,
         name,
         parent_id,
         task=task,
-        skills=skills,
+        skills=child_skills,
+        metadata=metadata,
     )
 
     await _start_child_runner(
@@ -327,7 +345,13 @@ async def respawn_subagents(
                 )
 
             child_skills = list(md.get("skills") or [])
-            child_agent = factory(name=name, skills=child_skills)
+            role_profile = None
+            role_id = md.get("role_id")
+            if isinstance(role_id, str) and role_id:
+                registry = _product_security_registry(parent_ctx)
+                if registry is not None:
+                    role_profile = registry.get(role_id)
+            child_agent = factory(name=name, skills=child_skills, role_profile=role_profile)
             await _start_child_runner(
                 parent_ctx=parent_ctx,
                 coordinator=coordinator,
@@ -750,3 +774,16 @@ async def _start_child_runner(
 
     task_handle = asyncio.create_task(_child_loop(), name=f"agent-{name}-{child_id}")
     await coordinator.attach_runtime(child_id, task=task_handle)
+
+
+def _product_security_registry(ctx: dict[str, Any]) -> RoleRegistry | None:
+    registry = ctx.get("product_security_roles")
+    return registry if isinstance(registry, RoleRegistry) else None
+
+
+def _merge_skills(role_skills: list[str], requested_skills: list[str]) -> list[str]:
+    merged: list[str] = []
+    for skill in [*role_skills, *requested_skills]:
+        if skill not in merged:
+            merged.append(skill)
+    return merged

@@ -12,7 +12,8 @@ from typing import Any, Literal, get_args
 
 from agents import RunContextWrapper, function_tool
 
-from strix.core.agents import Status, coordinator_from_context
+from strix.core.agents import AgentCoordinator, Status, coordinator_from_context
+from strix.domains.product_security.roles.registry import RoleRegistry, UnknownRoleError
 from strix.skills import validate_requested_skills
 
 
@@ -88,13 +89,18 @@ async def view_agent_graph(ctx: RunContextWrapper) -> str:
         )
 
     parent_of, statuses, names, _ = await coordinator.graph_snapshot()
+    async with coordinator._lock:
+        metadata = {aid: dict(md) for aid, md in coordinator.metadata.items()}
 
     lines: list[str] = []
 
     def render(aid: str, depth: int) -> None:
         status = statuses.get(aid, "?")
         marker = "  ← you" if aid == me else ""
-        lines.append(f"{'  ' * depth}- {names.get(aid, aid)} ({aid}) [{status}]{marker}")
+        role_meta = _agent_role_label(metadata.get(aid, {}))
+        lines.append(
+            f"{'  ' * depth}- {names.get(aid, aid)} ({aid}) [{status}]{role_meta}{marker}"
+        )
         for child, p in parent_of.items():
             if p == aid:
                 render(child, depth + 1)
@@ -116,6 +122,16 @@ async def view_agent_graph(ctx: RunContextWrapper) -> str:
         ensure_ascii=False,
         default=str,
     )
+
+
+def _agent_role_label(metadata: dict[str, Any]) -> str:
+    role_id = metadata.get("role_id")
+    if not isinstance(role_id, str) or not role_id:
+        return ""
+    risk_ceiling = metadata.get("risk_ceiling")
+    if isinstance(risk_ceiling, str) and risk_ceiling:
+        return f" role={role_id} risk={risk_ceiling}"
+    return f" role={role_id}"
 
 
 @function_tool(timeout=30)
@@ -368,6 +384,7 @@ async def create_agent(
     task: str,
     inherit_context: bool = True,
     skills: list[str] | None = None,
+    role: str | None = None,
 ) -> str:
     """Spawn a specialist child agent to run in parallel.
 
@@ -408,6 +425,8 @@ async def create_agent(
             when starting a clean-slate task.
         skills: List of skill names (e.g. ``["xss", "sql_injection"]``).
             Max 5; prefer 1-3.
+        role: Optional Product Security role ID. Only works when the
+            product-security profile has registered a domain role registry.
     """
     inner = _ctx(ctx)
     coordinator = coordinator_from_context(inner)
@@ -430,14 +449,51 @@ async def create_agent(
             default=str,
         )
 
-    skill_list = list(skills or [])
-    skill_error = validate_requested_skills(skill_list)
+    requested_skills = list(skills or [])
+    skill_error = validate_requested_skills(requested_skills)
     if skill_error:
         return json.dumps(
             {"success": False, "error": skill_error, "agent_id": None},
             ensure_ascii=False,
             default=str,
         )
+
+    skill_list = list(requested_skills)
+    role_profile = None
+    role_error: dict[str, Any] | None = None
+    if role:
+        registry = _product_security_registry(inner)
+        if registry is None:
+            role_error = {
+                "success": False,
+                "error_code": "PRODUCT_SECURITY_DOMAIN_NOT_ENABLED",
+                "error": "Product Security role requested but domain registry is not enabled",
+                "role_id": role,
+                "agent_id": None,
+            }
+        else:
+            try:
+                role_profile = registry.get(role)
+            except UnknownRoleError as exc:
+                role_error = {
+                    "success": False,
+                    "error_code": "UNKNOWN_PRODUCT_SECURITY_ROLE",
+                    "error": str(exc),
+                    "role_id": exc.role_id,
+                    "available_roles": exc.available_roles,
+                    "agent_id": None,
+                }
+            else:
+                role_error = await _role_spawn_error(
+                    coordinator,
+                    parent_id,
+                    registry,
+                    role_profile.role_id,
+                )
+                if role_error is None:
+                    skill_list = _merge_skills(role_profile.skills, skill_list)
+    if role_error is not None:
+        return json.dumps(role_error, ensure_ascii=False, default=str)
 
     parent_history = list(ctx.turn_input) if inherit_context and ctx.turn_input else []
     try:
@@ -446,6 +502,7 @@ async def create_agent(
             name=name,
             task=task,
             skills=skill_list,
+            role=role,
             parent_history=parent_history,
         )
     except Exception as e:
@@ -470,6 +527,57 @@ async def create_agent(
         ensure_ascii=False,
         default=str,
     )
+
+
+def _product_security_registry(ctx: dict[str, Any]) -> RoleRegistry | None:
+    registry = ctx.get("product_security_roles")
+    return registry if isinstance(registry, RoleRegistry) else None
+
+
+async def _role_spawn_error(
+    coordinator: AgentCoordinator,
+    parent_id: str,
+    registry: RoleRegistry,
+    requested_role_id: str,
+) -> dict[str, Any] | None:
+    snapshot = await coordinator.snapshot()
+    parent_metadata = snapshot.get("metadata", {}).get(parent_id, {})
+    parent_role_id = parent_metadata.get("role_id")
+    if not isinstance(parent_role_id, str) or not parent_role_id:
+        return None
+    try:
+        parent_profile = registry.get(parent_role_id)
+    except UnknownRoleError as exc:
+        return {
+            "success": False,
+            "error_code": "UNKNOWN_PRODUCT_SECURITY_PARENT_ROLE",
+            "error": str(exc),
+            "parent_role_id": parent_role_id,
+            "role_id": requested_role_id,
+            "agent_id": None,
+        }
+    if requested_role_id in parent_profile.can_spawn_roles:
+        return None
+    return {
+        "success": False,
+        "error_code": "PRODUCT_SECURITY_ROLE_SPAWN_NOT_ALLOWED",
+        "error": (
+            f"Product Security role '{parent_role_id}' cannot spawn "
+            f"role '{requested_role_id}'."
+        ),
+        "parent_role_id": parent_role_id,
+        "role_id": requested_role_id,
+        "allowed_roles": parent_profile.can_spawn_roles,
+        "agent_id": None,
+    }
+
+
+def _merge_skills(role_skills: list[str], requested_skills: list[str]) -> list[str]:
+    merged: list[str] = []
+    for skill in [*role_skills, *requested_skills]:
+        if skill not in merged:
+            merged.append(skill)
+    return merged
 
 
 @function_tool(timeout=30)

@@ -40,6 +40,11 @@ from strix.core.inputs import (
 )
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.core.sessions import open_agent_session
+from strix.domains.product_security import (
+    ProductSecurityConfig,
+    enable_product_security_domain,
+    ingest_configured_documents,
+)
 from strix.report.state import get_global_report_state
 from strix.runtime import session_manager
 from strix.telemetry.logging import set_scan_id, setup_scan_logging
@@ -57,6 +62,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 StreamEventSink = Callable[[str, Any], None]
+
+
+def _merge_unique_strings(first: list[str], second: list[str]) -> list[str]:
+    merged: list[str] = []
+    for item in [*first, *second]:
+        if item not in merged:
+            merged.append(item)
+    return merged
 
 
 def _merge_root_prompt_context(
@@ -243,6 +256,14 @@ async def run_strix_scan(
         scan_mode = str(scan_config.get("scan_mode") or "deep")
         is_whitebox = any(t.get("type") == "local_code" for t in targets)
         skills = list(scan_config.get("skills") or [])
+        product_security_config = ProductSecurityConfig.from_scan_config(scan_config)
+        product_security_runtime = enable_product_security_domain(
+            product_security_config,
+            run_dir,
+        )
+        if product_security_runtime.enabled:
+            ingest_configured_documents(product_security_runtime)
+            skills = _merge_unique_strings(["product_security_root"], skills)
         root_task = build_root_task(scan_config)
         model_settings = make_model_settings(
             settings.llm.reasoning_effort,
@@ -268,6 +289,16 @@ async def run_strix_scan(
             coordinator.set_budget_extender(hooks.extend_budget)
 
         scope_context = build_scope_context(scan_config)
+        if product_security_runtime.enabled:
+            scope_context = {
+                **scope_context,
+                "product_security": {
+                    "profile": product_security_config.profile,
+                    "documents": product_security_config.documents,
+                    "artifacts": product_security_config.artifacts,
+                    "artifact_root": str(product_security_runtime.artifact_repository.root),
+                },
+            }
         root_context = _merge_root_prompt_context(scope_context, extra_system_prompt_context)
         root_instructions = _compose_root_instructions_override(
             root_instructions_override,
@@ -288,6 +319,7 @@ async def run_strix_scan(
             chat_completions_tools=chat_completions_tools,
             system_prompt_context=root_context,
             instructions_override=root_instructions,
+            extra_tools=product_security_runtime.agent_tools,
         )
 
         if not is_resume:
@@ -305,6 +337,7 @@ async def run_strix_scan(
             interactive=interactive,
             chat_completions_tools=chat_completions_tools,
             system_prompt_context=scope_context,
+            extra_tools=product_security_runtime.agent_tools,
         )
 
         async def spawn_child_agent(**kwargs: Any) -> dict[str, Any]:
@@ -331,6 +364,9 @@ async def run_strix_scan(
             "spawn_child_agent": spawn_child_agent,
             "max_context_images": settings.runtime.max_context_images,
         }
+        if product_security_runtime.enabled:
+            context["product_security_roles"] = product_security_runtime.role_registry
+            context["product_security_artifacts"] = product_security_runtime.artifact_repository
 
         root_session = open_agent_session(root_id, agents_db)
         sessions_to_close.append(root_session)
