@@ -132,6 +132,30 @@ async def test_query_domain_artifact_rejects_path_traversal(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "firmware/inputs/item.json",
+        "firmware/blobs/sha256/aa/value",
+        "firmware/staging/pending.blob",
+        "firmware/firmware.db",
+    ],
+)
+async def test_query_domain_artifact_rejects_private_firmware_namespace(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    result = await _invoke(
+        query_domain_artifact,
+        {"relative_path": relative_path},
+        ArtifactRepository(tmp_path / "run"),
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "FIRMWARE_ACCESS_DENIED"
+
+
+@pytest.mark.asyncio
 async def test_create_evidence_writes_item_and_manifest(tmp_path: Path) -> None:
     repository = ArtifactRepository(tmp_path / "run")
     evidence = Evidence(
