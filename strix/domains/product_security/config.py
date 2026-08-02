@@ -16,6 +16,11 @@ class ProductSecurityConfig(BaseModel):
     profile: str | None = None
     documents: list[str] = Field(default_factory=list)
     artifacts: list[str] = Field(default_factory=list)
+    firmware_max_input_bytes: int = Field(
+        default=512 * 1024 * 1024,
+        gt=0,
+        le=8 * 1024 * 1024 * 1024,
+    )
 
     @property
     def enabled(self) -> bool:
@@ -27,6 +32,9 @@ class ProductSecurityConfig(BaseModel):
             profile=_optional_str(scan_config.get("profile")),
             documents=_string_list(scan_config.get("documents")),
             artifacts=_string_list(scan_config.get("artifacts")),
+            firmware_max_input_bytes=int(
+                scan_config.get("firmware_max_input_bytes") or 512 * 1024 * 1024
+            ),
         )
 
 

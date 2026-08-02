@@ -260,6 +260,8 @@ async def run_strix_scan(
         product_security_runtime = enable_product_security_domain(
             product_security_config,
             run_dir,
+            scan_id=scan_id,
+            resume=is_resume,
         )
         if product_security_runtime.enabled:
             ingest_configured_documents(product_security_runtime)
@@ -319,7 +321,7 @@ async def run_strix_scan(
             chat_completions_tools=chat_completions_tools,
             system_prompt_context=root_context,
             instructions_override=root_instructions,
-            extra_tools=product_security_runtime.agent_tools,
+            extra_tools=product_security_runtime.root_tools,
         )
 
         if not is_resume:
@@ -337,7 +339,7 @@ async def run_strix_scan(
             interactive=interactive,
             chat_completions_tools=chat_completions_tools,
             system_prompt_context=scope_context,
-            extra_tools=product_security_runtime.agent_tools,
+            extra_tools=product_security_runtime.role_tools,
         )
 
         async def spawn_child_agent(**kwargs: Any) -> dict[str, Any]:
@@ -367,6 +369,13 @@ async def run_strix_scan(
         if product_security_runtime.enabled:
             context["product_security_roles"] = product_security_runtime.role_registry
             context["product_security_artifacts"] = product_security_runtime.artifact_repository
+            context["firmware_analysis_service"] = product_security_runtime.firmware_service
+            context["firmware_access_issuer"] = product_security_runtime.firmware_access_issuer
+            context["firmware_access"] = (
+                product_security_runtime.firmware_access_issuer.issue_root(agent_id=root_id)
+                if product_security_runtime.firmware_access_issuer is not None
+                else None
+            )
 
         root_session = open_agent_session(root_id, agents_db)
         sessions_to_close.append(root_session)

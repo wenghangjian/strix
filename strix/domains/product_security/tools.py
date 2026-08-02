@@ -59,6 +59,18 @@ def _error_response(exc: DomainArtifactError | ValidationError) -> str:
     )
 
 
+def _require_public_artifact_path(relative_path: str) -> None:
+    normalized_path = relative_path.replace("\\", "/").lstrip("./")
+    if (
+        normalized_path in {"firmware", "firmware.db"}
+        or normalized_path.startswith("firmware/")
+    ):
+        raise DomainArtifactError(
+            "FIRMWARE_ACCESS_DENIED",
+            "Firmware state is available only through authorized firmware tools.",
+        )
+
+
 @function_tool(timeout=30)
 async def get_document_manifest(ctx: RunContextWrapper[Any]) -> str:
     """Return the deduplicated Product Security input document manifest."""
@@ -83,6 +95,7 @@ async def read_document_text(ctx: RunContextWrapper[Any], document_id: str) -> s
 async def query_domain_artifact(ctx: RunContextWrapper[Any], relative_path: str) -> str:
     """Read a text or JSON artifact below the current run's domain directory."""
     try:
+        _require_public_artifact_path(relative_path)
         repository = _repository(ctx)
         content = repository.read_text(relative_path)
         try:

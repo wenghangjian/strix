@@ -44,7 +44,13 @@ async def test_bootstrap_ingests_once_and_resume_reuses_state(tmp_path: Path) ->
     )
     queued = json.loads(await start_firmware_analysis.on_invoke_tool(context, arguments))
 
-    resumed = enable_product_security_domain(config, run_dir, scan_id="scan-1")
+    source.unlink()
+    resumed = enable_product_security_domain(
+        config,
+        run_dir,
+        scan_id="scan-1",
+        resume=True,
+    )
 
     assert queued["success"] is True
     assert len(resumed.firmware_service.list_inputs()) == 1
@@ -63,4 +69,3 @@ def test_disabled_bootstrap_creates_no_firmware_state(tmp_path: Path) -> None:
     assert runtime.root_tools == ()
     assert runtime.role_tools == ()
     assert not (tmp_path / "run" / "domain" / "firmware").exists()
-
