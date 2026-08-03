@@ -27,6 +27,7 @@ class WorkerStaging:
     def __init__(self, root: Path = Path("/work")) -> None:
         self.root = root
         self.input_path = root / "input.bin"
+        self.output_root = root / "output"
         self._file: BinaryIO | None = None
         self._created = False
         self._declared_size = 0
@@ -35,6 +36,55 @@ class WorkerStaging:
         self._maximum_chunk_bytes = 0
         self._received_size = 0
         self._hasher = hashlib.sha256()
+
+    def prepare_output(self) -> None:
+        try:
+            self.output_root.mkdir(mode=0o700)
+        except FileExistsError as exc:
+            raise WorkerStagingError(
+                "WORKER_INTERNAL_ERROR",
+                "Worker output staging path already exists.",
+            ) from exc
+        except OSError as exc:
+            raise WorkerStagingError(
+                "WORKER_INTERNAL_ERROR",
+                "Worker output staging could not be created.",
+            ) from exc
+
+    def create_output_blob(self, ordinal: int) -> tuple[Path, BinaryIO]:
+        if ordinal < 0 or ordinal > 99_999_999 or not self.output_root.is_dir():
+            raise WorkerStagingError(
+                "WORKER_INTERNAL_ERROR",
+                "Worker output staging is not ready.",
+            )
+        path = self.output_root / f"blob_{ordinal:08d}"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        try:
+            descriptor = os.open(path, flags, 0o600)
+        except OSError as exc:
+            raise WorkerStagingError(
+                "WORKER_INTERNAL_ERROR",
+                "Worker output blob could not be created.",
+            ) from exc
+        return path, os.fdopen(descriptor, "wb", buffering=0)
+
+    def clear_output(self) -> None:
+        if not self.output_root.exists():
+            return
+        try:
+            for child in self.output_root.iterdir():
+                if not child.is_file() and not child.is_symlink():
+                    _raise_unexpected_output_entry()
+                child.unlink()
+            self.output_root.rmdir()
+        except WorkerStagingError:
+            raise
+        except OSError as exc:
+            raise WorkerStagingError(
+                "WORKER_INTERNAL_ERROR",
+                "Worker output staging could not be cleared.",
+            ) from exc
 
     def begin(
         self,
@@ -156,3 +206,10 @@ class WorkerStaging:
         finally:
             self._file.close()
             self._file = None
+
+
+def _raise_unexpected_output_entry() -> None:
+    raise WorkerStagingError(
+        "WORKER_INTERNAL_ERROR",
+        "Worker output staging contains an unexpected entry.",
+    )
