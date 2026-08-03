@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import io
+import stat
 import tarfile
+import zipfile
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
@@ -20,6 +22,15 @@ class TarFixtureEntry:
     member_type: bytes = tarfile.REGTYPE
     linkname: str = ""
     pax_headers: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ZipFixtureEntry:
+    name: str
+    data: bytes = b""
+    compression: int = zipfile.ZIP_DEFLATED
+    unix_mode: int | None = None
+    extra: bytes = b""
 
 
 def build_tar(
@@ -62,3 +73,29 @@ def patch_tar_declared_size(
     if truncate_at is not None:
         del raw[truncate_at:]
     path.write_bytes(raw)
+
+
+def build_zip(
+    path: Path,
+    entries: list[ZipFixtureEntry],
+    *,
+    force_zip64: bool = False,
+) -> Path:
+    with zipfile.ZipFile(path, "w", allowZip64=True) as archive:
+        for entry in entries:
+            info = zipfile.ZipInfo(entry.name, date_time=(2024, 1, 2, 3, 4, 6))
+            info.compress_type = entry.compression
+            info.create_system = 3
+            info.extra = entry.extra
+            mode = entry.unix_mode
+            if mode is None:
+                mode = (
+                    (stat.S_IFDIR | 0o750) if entry.name.endswith("/") else (stat.S_IFREG | 0o640)
+                )
+            info.external_attr = mode << 16
+            if force_zip64 and not entry.name.endswith("/"):
+                with archive.open(info, "w", force_zip64=True) as destination:
+                    destination.write(entry.data)
+            else:
+                archive.writestr(info, entry.data)
+    return path
