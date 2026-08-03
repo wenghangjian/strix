@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, BinaryIO
@@ -28,9 +27,7 @@ from strix.domains.product_security.firmware.protocol.messages import (
     InputBegin,
     InputEnd,
     ManifestAccepted,
-    P2AManifest,
     RequestAccepted,
-    WorkerResult,
     decode_json_message,
     encode_json_message,
 )
@@ -38,7 +35,14 @@ from strix.domains.product_security.firmware.protocol.state import (
     WorkerState,
     WorkerStateMachine,
 )
+from strix.domains.product_security.firmware.worker.adapters.base import AdapterOutput
+from strix.domains.product_security.firmware.worker.export import WorkerExporter
 from strix.domains.product_security.firmware.worker.limits import WorkerLimits
+from strix.domains.product_security.firmware.worker.manifest import (
+    LocalStatus,
+    analyze_archive,
+    build_manifest,
+)
 from strix.domains.product_security.firmware.worker.staging import (
     StagedInput,
     WorkerStaging,
@@ -86,7 +90,8 @@ class WorkerSession:
         self._request: AnalysisRequest | None = None
         self._limits: WorkerLimits | None = None
         self._staged: StagedInput | None = None
-        self._manifest_sha256: str | None = None
+        self._analysis: AdapterOutput | LocalStatus | None = None
+        self._exporter: WorkerExporter | None = None
         self._started_at = 0.0
 
     def run(self, reader: BinaryIO, writer: BinaryIO) -> int:
@@ -243,74 +248,59 @@ class WorkerSession:
             ),
         )
         self._state.advance(WorkerState.ANALYZE)
-        self._send_initial_manifest(writer)
+        self._analyze_and_send_manifest(writer)
 
-    def _send_initial_manifest(self, writer: BinaryIO) -> None:
+    def _analyze_and_send_manifest(self, writer: BinaryIO) -> None:
         request = self._require_request()
         staged = self._require_staged()
-        manifest = P2AManifest(
-            manifest_schema="p2a-manifest-1",
-            protocol_version="1.0",
-            analysis_id=request.analysis_id,
-            input_artifact_id=request.input_artifact_id,
-            input_size=staged.size,
-            input_sha256=staged.sha256,
-            adapter_id=None,
-            adapter_version=None,
-            status="not_applicable",
-            generated_at_utc=self._now(),
-            worker_build_id=self._worker_build_id,
-            blob_count=0,
-            total_blob_bytes=0,
-            blobs=[],
-            warning_codes=[],
-            rejected_entry_count=0,
-            ignored_directory_count=0,
-            limits_profile="p2a-default-v1",
+        limits = self._require_limits()
+        self._analysis = analyze_archive(
+            input_path=staged.path,
+            enabled_adapters=request.enabled_adapters,
+            limits=limits,
+            staging=self._staging,
         )
-        payload = encode_json_message(manifest)
-        if len(payload) > self._require_limits().maximum_manifest_bytes:
-            raise WorkerSessionError(
-                "WORKER_MANIFEST_TOO_LARGE",
-                "Worker manifest exceeds the requested limit.",
-            )
-        self._manifest_sha256 = hashlib.sha256(payload).hexdigest()
+        manifest = build_manifest(
+            request=request,
+            staged_input=staged,
+            analysis=self._analysis,
+            worker_build_id=self._worker_build_id,
+            generated_at_utc=self._now(),
+        )
+        output = self._analysis if isinstance(self._analysis, AdapterOutput) else None
+        self._exporter = WorkerExporter(
+            manifest=manifest,
+            output=output,
+            output_chunk_bytes=limits.output_chunk_bytes,
+            maximum_manifest_bytes=limits.maximum_manifest_bytes,
+            send_frame=lambda message_type, payload, stream_id, flags: self._send_frame_payload(
+                writer,
+                message_type,
+                payload,
+                stream_id=stream_id,
+                flags=flags,
+            ),
+        )
         self._state.advance(WorkerState.WAIT_MANIFEST_ACCEPTANCE)
-        self._send_payload(writer, MessageType.MANIFEST, payload)
+        self._exporter.send_manifest()
 
     def _accept_manifest(self, frame: Frame, writer: BinaryIO) -> None:
         self._require_json_control(frame)
         accepted = decode_json_message(frame.payload, ManifestAccepted)
         self._state.accept(frame.message_type)
-        request = self._require_request()
-        if (
-            accepted.analysis_id != request.analysis_id
-            or accepted.manifest_sha256 != self._manifest_sha256
-            or accepted.accepted_blob_count != 0
-            or accepted.accepted_total_bytes != 0
-        ):
-            raise WorkerSessionError(
-                "WORKER_MANIFEST_NOT_ACCEPTED",
-                "Host manifest acceptance does not match worker output.",
-            )
-
+        exporter = self._require_exporter()
+        result = exporter.send_manifest_and_blobs(
+            accepted,
+            worker_duration_ms=max(
+                0,
+                int((self._monotonic() - self._started_at) * 1000),
+            ),
+        )
         self._state.advance(WorkerState.SEND_RESULT)
         self._send(
             writer,
             MessageType.RESULT,
-            WorkerResult(
-                analysis_id=request.analysis_id,
-                status="not_applicable",
-                adapter_id=None,
-                manifest_sha256=self._require_manifest_sha256(),
-                emitted_blob_count=0,
-                emitted_total_bytes=0,
-                warning_codes=[],
-                worker_duration_ms=max(
-                    0,
-                    int((self._monotonic() - self._started_at) * 1000),
-                ),
-            ),
+            result,
             final=True,
         )
         self._state.advance(WorkerState.EXIT)
@@ -341,11 +331,28 @@ class WorkerSession:
         flags = FrameFlags.JSON_PAYLOAD
         if final:
             flags |= FrameFlags.FINAL
+        self._send_frame_payload(
+            writer,
+            message_type,
+            payload,
+            stream_id=CONTROL_STREAM,
+            flags=flags,
+        )
+
+    def _send_frame_payload(
+        self,
+        writer: BinaryIO,
+        message_type: MessageType,
+        payload: bytes,
+        *,
+        stream_id: int,
+        flags: FrameFlags,
+    ) -> None:
         encoded = FrameEncoder.encode(
             Frame(
                 message_type=message_type,
                 flags=flags,
-                stream_id=CONTROL_STREAM,
+                stream_id=stream_id,
                 sequence=self._outgoing_sequence,
                 payload=payload,
             )
@@ -394,10 +401,10 @@ class WorkerSession:
             raise WorkerSessionError("WORKER_INTERNAL_ERROR", "Staged input is missing.")
         return self._staged
 
-    def _require_manifest_sha256(self) -> str:
-        if self._manifest_sha256 is None:
-            raise WorkerSessionError("WORKER_INTERNAL_ERROR", "Manifest identity is missing.")
-        return self._manifest_sha256
+    def _require_exporter(self) -> WorkerExporter:
+        if self._exporter is None:
+            raise WorkerSessionError("WORKER_INTERNAL_ERROR", "Worker exporter is missing.")
+        return self._exporter
 
     @staticmethod
     def _fail_request(message: str) -> None:
