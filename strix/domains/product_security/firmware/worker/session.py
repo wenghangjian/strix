@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, BinaryIO, Literal
 
 from strix.domains.product_security.firmware.errors import FirmwareDomainError
 from strix.domains.product_security.firmware.protocol.constants import (
@@ -28,6 +28,7 @@ from strix.domains.product_security.firmware.protocol.messages import (
     InputEnd,
     ManifestAccepted,
     RequestAccepted,
+    WorkerError,
     decode_json_message,
     encode_json_message,
 )
@@ -128,6 +129,27 @@ class WorkerSession:
                 f"FWAP input ended in state {self._state.state.value}.",
             )
         return 0
+
+    def emit_error(self, writer: BinaryIO, error: FirmwareDomainError) -> None:
+        analysis_id = (
+            self._request.analysis_id
+            if self._request is not None
+            else self._hello.analysis_id
+            if self._hello is not None
+            else "fw_analysis_0000000000000000"
+        )
+        self._send(
+            writer,
+            MessageType.ERROR,
+            WorkerError(
+                analysis_id=analysis_id,
+                error_code=error.error_code,
+                phase=_error_phase(error.error_code),
+                message=error.message[:512],
+                retryable=error.retryable,
+            ),
+            final=True,
+        )
 
     def _accept(self, frame: Frame, writer: BinaryIO) -> None:
         if frame.message_type is MessageType.CANCEL:
@@ -409,3 +431,22 @@ class WorkerSession:
     @staticmethod
     def _fail_request(message: str) -> None:
         raise WorkerSessionError("WORKER_REQUEST_INVALID", message)
+
+
+def _error_phase(
+    error_code: str,
+) -> Literal["protocol", "input", "analysis", "manifest", "export", "internal"]:
+    if error_code.startswith("FWAP_") or error_code in {
+        "WORKER_REQUEST_INVALID",
+        "WORKER_LIMIT_INVALID",
+    }:
+        return "protocol"
+    if error_code.startswith("WORKER_INPUT_"):
+        return "input"
+    if error_code.startswith(("WORKER_FORMAT_", "WORKER_TAR_", "WORKER_ZIP_")):
+        return "analysis"
+    if error_code.startswith("WORKER_MANIFEST_"):
+        return "manifest"
+    if error_code.startswith(("WORKER_OUTPUT_", "WORKER_FILE_")):
+        return "export"
+    return "internal"

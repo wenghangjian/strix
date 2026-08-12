@@ -40,16 +40,13 @@ def worker_source_digest() -> str:
     relative_paths.extend(
         path.relative_to(REPOSITORY_ROOT)
         for path in sorted(
-            (REPOSITORY_ROOT / "strix/domains/product_security/firmware/protocol").glob(
-                "**/*.py"
-            )
+            (REPOSITORY_ROOT / "strix/domains/product_security/firmware/protocol").glob("**/*.py")
         )
     )
     worker_dir = REPOSITORY_ROOT / "strix/domains/product_security/firmware/worker"
     if worker_dir.is_dir():
         relative_paths.extend(
-            path.relative_to(REPOSITORY_ROOT)
-            for path in sorted(worker_dir.glob("**/*.py"))
+            path.relative_to(REPOSITORY_ROOT) for path in sorted(worker_dir.glob("**/*.py"))
         )
 
     digest = hashlib.sha256()
@@ -101,6 +98,7 @@ def verify_image(image: str) -> None:
     assert config["Entrypoint"] == EXPECTED_ENTRYPOINT
     assert labels["io.strix.firmware.worker.source-digest"] == lock["worker_source_digest"]
     assert lock["worker_source_digest"] == worker_source_digest()
+    assert environment["STRIX_FIRMWARE_WORKER_BUILD_ID"] == lock["worker_source_digest"]
     for key, value in EXPECTED_ENVIRONMENT.items():
         assert environment[key] == value
     assert not any(key.lower().endswith("proxy") for key in environment)
@@ -115,10 +113,12 @@ import sys
 import zlib
 import pydantic
 from strix.domains.product_security.firmware.protocol.constants import PROTOCOL_MAJOR
+from strix.domains.product_security.firmware.worker.session import WorkerSession
 
 assert sys.version_info[:2] == (3, 12)
 assert (os.getuid(), os.getgid()) == (65532, 65532)
 assert PROTOCOL_MAJOR == 1
+assert WorkerSession.__name__ == "WorkerSession"
 assert zlib.decompress(zlib.compress(b"firmware")) == b"firmware"
 assert bz2.decompress(bz2.compress(b"firmware")) == b"firmware"
 assert lzma.decompress(lzma.compress(b"firmware")) == b"firmware"

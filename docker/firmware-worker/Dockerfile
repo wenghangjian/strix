@@ -27,11 +27,13 @@ COPY strix/__init__.py /app/strix/__init__.py
 COPY strix/domains/__init__.py /app/strix/domains/__init__.py
 COPY strix/domains/product_security/firmware/errors.py /app/strix/domains/product_security/firmware/errors.py
 COPY strix/domains/product_security/firmware/protocol /app/strix/domains/product_security/firmware/protocol
+COPY strix/domains/product_security/firmware/worker /app/strix/domains/product_security/firmware/worker
 
 ENV PYTHONHASHSEED=0 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app:/opt/firmware-worker/site-packages \
+    STRIX_FIRMWARE_WORKER_BUILD_ID=${WORKER_SOURCE_DIGEST} \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
 
